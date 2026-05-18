@@ -14,7 +14,9 @@ from screni.data.combine import ScReniNetworks
 from screni.data.differential import (
     benjamini_hochberg,
     differential_edges,
+    ols_with_continuous_score,
     ols_with_covariates,
+    ols_with_ordinal_severity,
     pseudobulk_per_donor,
     wilcoxon_unadjusted,
 )
@@ -247,6 +249,64 @@ def test_differential_edges_skips_unknown_genes():
     out = differential_edges(pb, edges)
     assert len(out) == 1
     assert out.iloc[0]["target"] == "gene_001"
+
+
+def test_ols_ordinal_finds_monotonic_signal():
+    """Edge weight scaling monotonically with ADNC level should be picked up
+    by ordinal regression at much smaller p than the binary OLS."""
+    rng = np.random.default_rng(123)
+    n = 28
+    # 4 ADNC levels x 7 donors each
+    adnc = np.repeat([0, 1, 2, 3], 7)
+    # y scales linearly with ADNC (so ordinal is the right model)
+    y = 0.05 * adnc + rng.normal(scale=0.02, size=n)
+    df = pd.DataFrame({
+        "adnc_ordinal": adnc.astype(float),
+        "age": rng.normal(85, 5, size=n),
+        "sex": rng.choice(["Male", "Female"], size=n),
+        "LATE_present": rng.choice([True, False], size=n),
+        "LBD_present": rng.choice([True, False], size=n),
+    })
+    res = ols_with_ordinal_severity(y, df)
+    assert res.coef > 0
+    assert res.p_value < 1e-6
+
+
+def test_ols_continuous_score_finds_signal():
+    rng = np.random.default_rng(7)
+    n = 28
+    cps = rng.uniform(0.1, 0.95, size=n)
+    y = 0.5 * cps + rng.normal(scale=0.02, size=n)
+    df = pd.DataFrame({
+        "cps": cps,
+        "age": rng.normal(85, 5, size=n),
+        "sex": rng.choice(["Male", "Female"], size=n),
+        "LATE_present": rng.choice([True, False], size=n),
+        "LBD_present": rng.choice([True, False], size=n),
+    })
+    res = ols_with_continuous_score(y, df)
+    assert res.coef > 0
+    assert res.p_value < 1e-6
+
+
+def test_ols_with_continuous_score_drops_nan_donors():
+    """If some donors have NaN cps (e.g. score missing), they should be
+    dropped before fitting rather than crashing."""
+    rng = np.random.default_rng(2)
+    n = 12
+    cps = rng.uniform(0.1, 0.95, size=n)
+    cps[3:5] = np.nan
+    y = 0.5 * np.where(np.isnan(cps), 0, cps) + rng.normal(scale=0.02, size=n)
+    df = pd.DataFrame({
+        "cps": cps,
+        "age": rng.normal(85, 5, size=n),
+        "sex": rng.choice(["Male", "Female"], size=n),
+        "LATE_present": rng.choice([True, False], size=n),
+        "LBD_present": rng.choice([True, False], size=n),
+    })
+    res = ols_with_continuous_score(y, df)
+    assert res.n_donors == 10  # 12 - 2 NaN
+    assert not np.isnan(res.p_value)
 
 
 def test_wilcoxon_alternative_runs():

@@ -590,6 +590,15 @@ def qc_summary(
 # We pool the lower two ADNC categories into 'control' and the upper two
 # into 'ad'.
 ADNC_COL = "Overall AD neuropathological Change"
+CPS_COL = "Continuous Pseudo-progression Score"
+# Ordinal ADNC encoding (0..3) for ordinal regression — uses all 4 levels
+# instead of collapsing to binary control/ad. Higher number = more severe AD.
+ADNC_TO_ORDINAL = {
+    "Not AD": 0,
+    "Low": 1,
+    "Intermediate": 2,
+    "High": 3,
+}
 ADNC_TO_CONDITION = {
     "Not AD": "control",
     "Low": "control",
@@ -628,6 +637,8 @@ def add_condition_column(
     adata.obs["condition"] = pd.Categorical(
         mapped, categories=["control", "ad"], ordered=False
     )
+    # Ordinal encoding for ordinal regression (0..3)
+    adata.obs["adnc_ordinal"] = raw.map(ADNC_TO_ORDINAL).astype("Float32")
     n_ctrl = int((adata.obs["condition"] == "control").sum())
     n_ad = int((adata.obs["condition"] == "ad").sum())
     n_drop = int(mapped.isna().sum())
@@ -728,6 +739,12 @@ def select_eligible_donors(
         rows.append({
             "donor_id": d,
             "condition": str(first.get("condition", "")),
+            "adnc_ordinal": float(first["adnc_ordinal"])
+                if "adnc_ordinal" in d_cells.columns
+                and pd.notna(first["adnc_ordinal"]) else np.nan,
+            "cps": float(first[CPS_COL])
+                if CPS_COL in d_cells.columns
+                and pd.notna(first[CPS_COL]) else np.nan,
             "n_cells": int(len(d_cells)),
             "age": float(first["Age at Death"])
                 if "Age at Death" in d_cells.columns

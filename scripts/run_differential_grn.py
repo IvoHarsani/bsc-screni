@@ -38,7 +38,9 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 from screni.data.combine import combine_wscreni_networks
 from screni.data.differential import (
     differential_edges,
+    ols_with_continuous_score,
     ols_with_covariates,
+    ols_with_ordinal_severity,
     pseudobulk_per_donor,
     wilcoxon_unadjusted,
 )
@@ -179,42 +181,56 @@ def main() -> int:
             aggregator="mean",
         )
 
-        # 4d. OLS-with-covariates differential test (primary)
-        logger.info(f"\n  running OLS-with-covariates differential test ...")
-        results_ols = differential_edges(
-            pseudobulks=pseudobulks,
-            edges=triplets,
-            test=ols_with_covariates,
-            cell_type=ct,
-        )
-        ols_csv = os.path.join(
-            OUT_DIR, f"differential_edges_{_safe(ct)}.csv"
-        )
-        results_ols.to_csv(ols_csv, index=False)
-        logger.info(f"  wrote OLS results -> {ols_csv}")
-        logger.info(f"\n  top-10 by q-value:\n{results_ols.head(10).to_string()}")
+        # 4d. Four differential tests — binary OLS (primary), Wilcoxon
+        # (no-covariate sensitivity), ordinal OLS (4-level ADNC), and
+        # continuous-CPS OLS (most granular).  Same triplet edge universe
+        # for all four so q-values are directly comparable across tests.
+        tests = [
+            ("ols",      "OLS, binary control vs ad (primary)",       ols_with_covariates),
+            ("wilcoxon", "Mann-Whitney U, binary, no covariate adj.", wilcoxon_unadjusted),
+            ("ordinal",  "OLS, ADNC ordinal (0..3)",                  ols_with_ordinal_severity),
+            ("cps",      "OLS, continuous pseudo-progression score",  ols_with_continuous_score),
+        ]
 
-        # 4e. Wilcoxon sensitivity check (no covariate adjustment)
-        logger.info(f"\n  running Wilcoxon sensitivity test ...")
-        results_wx = differential_edges(
-            pseudobulks=pseudobulks,
-            edges=triplets,
-            test=wilcoxon_unadjusted,
-            cell_type=ct,
-        )
-        wx_csv = os.path.join(
-            OUT_DIR, f"differential_edges_{_safe(ct)}_wilcoxon.csv"
-        )
-        results_wx.to_csv(wx_csv, index=False)
-        logger.info(f"  wrote Wilcoxon results -> {wx_csv}")
+        results_by_name = {}
+        for tag, label, fn in tests:
+            logger.info(f"\n  running {label} ...")
+            try:
+                results = differential_edges(
+                    pseudobulks=pseudobulks,
+                    edges=triplets,
+                    test=fn,
+                    cell_type=ct,
+                )
+            except Exception as e:
+                logger.error(f"  test {tag} failed: {e}")
+                continue
+            suffix = "" if tag == "ols" else f"_{tag}"
+            out_csv = os.path.join(
+                OUT_DIR, f"differential_edges_{_safe(ct)}{suffix}.csv"
+            )
+            results.to_csv(out_csv, index=False)
+            n_sig = int((results["q_value"] < 0.05).sum())
+            best_q = float(results["q_value"].min()) if len(results) else float("nan")
+            logger.info(
+                f"  wrote {tag} -> {out_csv}  "
+                f"(n_tested={len(results)}, q<0.05={n_sig}, best q={best_q:.4f})"
+            )
+            logger.info(f"\n  {tag} top-10 by q-value:\n{results.head(10).to_string()}")
+            results_by_name[tag] = results
 
-        # 4f. overlap diagnostic
-        top_ols = set(zip(results_ols.head(50)["TF"], results_ols.head(50)["target"]))
-        top_wx = set(zip(results_wx.head(50)["TF"], results_wx.head(50)["target"]))
-        overlap = top_ols & top_wx
-        logger.info(
-            f"\n  overlap of top-50 (OLS ∩ Wilcoxon): {len(overlap)} / 50"
-        )
+        # 4e. cross-test overlap diagnostic (top 50 by q)
+        logger.info("\n  cross-test overlap (top-50 by q-value):")
+        names = list(results_by_name.keys())
+        top_sets = {
+            n: set(zip(results_by_name[n].head(50)["TF"],
+                       results_by_name[n].head(50)["target"]))
+            for n in names
+        }
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                overlap = top_sets[a] & top_sets[b]
+                logger.info(f"    {a} ∩ {b}: {len(overlap)} / 50")
 
     logger.info("\nDone.")
     return 0

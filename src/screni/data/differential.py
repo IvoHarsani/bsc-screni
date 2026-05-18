@@ -255,6 +255,112 @@ def ols_with_covariates(
     )
 
 
+def _ols_with_numeric_predictor(
+    edge_values: np.ndarray,
+    metadata: pd.DataFrame,
+    predictor_col: str,
+    covariates: Iterable[str] = ("age", "sex", "LATE_present", "LBD_present"),
+) -> EdgeTestResult:
+    """Shared OLS implementation parameterised by which numeric column is
+    the disease predictor.
+
+    Used by :func:`ols_with_ordinal_severity` (predictor=``adnc_ordinal``,
+    0..3) and :func:`ols_with_continuous_score` (predictor=``cps``,
+    continuous 0..1).  Same covariate handling as
+    :func:`ols_with_covariates`.
+    """
+    if predictor_col not in metadata.columns:
+        raise KeyError(f"metadata missing {predictor_col!r} column")
+    if len(edge_values) != len(metadata):
+        raise ValueError(
+            f"edge_values length {len(edge_values)} != n donors {len(metadata)}"
+        )
+
+    df = metadata.copy()
+    df["_y"] = edge_values
+    df["_predictor"] = df[predictor_col].astype(float)
+
+    cols = ["_predictor"]
+    for c in covariates:
+        if c not in df.columns:
+            continue
+        ser = df[c]
+        if ser.dtype == bool or ser.dtype == "boolean":
+            df[f"_cov_{c}"] = ser.astype(int)
+            cols.append(f"_cov_{c}")
+        elif ser.dtype.kind in "biufc":
+            df[f"_cov_{c}"] = ser.astype(float)
+            cols.append(f"_cov_{c}")
+        else:
+            dummies = pd.get_dummies(ser, prefix=f"_cov_{c}", drop_first=True)
+            for dc in dummies.columns:
+                df[dc] = dummies[dc].astype(int)
+                cols.append(dc)
+
+    keep = []
+    for c in cols:
+        if c == "_predictor" or df[c].nunique(dropna=False) > 1:
+            keep.append(c)
+        else:
+            logger.debug(f"  dropping constant covariate {c}")
+    cols = keep
+
+    # Drop donors with missing predictor values (e.g. CPS NaN)
+    valid = df["_predictor"].notna() & df["_y"].notna()
+    df_v = df.loc[valid]
+    if len(df_v) < 4:
+        return EdgeTestResult(np.nan, np.nan, np.nan, np.nan, len(df_v))
+
+    X = df_v[cols].astype(float).values
+    X = sm.add_constant(X, has_constant="add")
+    y = df_v["_y"].values.astype(float)
+    try:
+        fit = sm.OLS(y, X).fit()
+    except Exception as e:
+        logger.debug(f"  OLS failed: {e}")
+        return EdgeTestResult(np.nan, np.nan, np.nan, np.nan, len(df_v))
+
+    return EdgeTestResult(
+        coef=float(fit.params[1]),
+        stderr=float(fit.bse[1]),
+        t_stat=float(fit.tvalues[1]),
+        p_value=float(fit.pvalues[1]),
+        n_donors=len(df_v),
+    )
+
+
+def ols_with_ordinal_severity(
+    edge_values: np.ndarray,
+    metadata: pd.DataFrame,
+) -> EdgeTestResult:
+    """OLS with ADNC treated as an ordinal severity score (0..3).
+
+    Tests whether edge weight scales linearly with the ordinal ADNC level
+    (Not AD=0, Low=1, Intermediate=2, High=3).  More powerful than binary
+    condition contrast when the AD effect is monotonic.  Requires donor
+    metadata to have an ``adnc_ordinal`` column.
+    """
+    return _ols_with_numeric_predictor(
+        edge_values, metadata, predictor_col="adnc_ordinal"
+    )
+
+
+def ols_with_continuous_score(
+    edge_values: np.ndarray,
+    metadata: pd.DataFrame,
+) -> EdgeTestResult:
+    """OLS with the Continuous Pseudo-progression Score (0..1) as predictor.
+
+    Tests whether edge weight scales linearly with the continuous disease
+    score.  Slightly finer-grained than ordinal because it uses
+    within-category ordering.  Requires donor metadata to have a ``cps``
+    column.
+    """
+    return _ols_with_numeric_predictor(
+        edge_values, metadata, predictor_col="cps"
+    )
+
+
 def wilcoxon_unadjusted(
     edge_values: np.ndarray,
     metadata: pd.DataFrame,
