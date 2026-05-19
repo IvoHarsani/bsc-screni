@@ -178,29 +178,29 @@ def plot_single_tf_fanout(mat: np.ndarray, gene_to_idx: dict, triplets: pd.DataF
         angle = 2 * np.pi * i / n
         pos[t] = (np.cos(angle), np.sin(angle))
 
-    fig, ax = plt.subplots(figsize=(8.5, 7))
+    fig, ax = plt.subplots(figsize=(12, 10))
 
     # nodes
     nx.draw_networkx_nodes(
         G, pos, ax=ax, nodelist=[tf], node_color="#e8a020",
-        node_shape="D", node_size=2400, edgecolors="white", linewidths=2,
+        node_shape="D", node_size=4200, edgecolors="white", linewidths=2.5,
     )
     nx.draw_networkx_nodes(
         G, pos, ax=ax, nodelist=[t for t, _ in top], node_color="#88aacc",
-        node_size=1500, edgecolors="white", linewidths=2,
+        node_size=2800, edgecolors="white", linewidths=2.5,
     )
 
     # edges scaled by abs(weight)
     wmax = max(abs(w) for _, w in top) or 1.0
-    widths = [1.5 + 6.0 * abs(w) / wmax for _, w in top]
+    widths = [2.5 + 10.0 * abs(w) / wmax for _, w in top]
     nx.draw_networkx_edges(
         G, pos, ax=ax, width=widths, edge_color="#555555",
-        arrows=True, arrowsize=22, alpha=0.7,
-        min_target_margin=22, node_size=1500,
+        arrows=True, arrowsize=30, alpha=0.7,
+        min_target_margin=30, node_size=2800,
     )
 
     # labels
-    nx.draw_networkx_labels(G, pos, ax=ax, font_size=13, font_weight="bold")
+    nx.draw_networkx_labels(G, pos, ax=ax, font_size=16, font_weight="bold")
 
     ax.set_title(
         f"Example: a single-cell regulatory subnetwork\n"
@@ -260,7 +260,7 @@ def plot_ad_vs_control_bipartite(mat_ctrl, mat_ad, gene_to_idx, save_path: str):
         pos[tgt] = (1.0, len(targets) - 1 - i)
 
     # equal axis range so the panels look identical in scale
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6.5))
+    fig, axes = plt.subplots(1, 2, figsize=(18, 9))
     for ax, G, title in [
         (axes[0], G_ctrl, "Average control donor"),
         (axes[1], G_ad,   "Average AD donor"),
@@ -268,12 +268,12 @@ def plot_ad_vs_control_bipartite(mat_ctrl, mat_ad, gene_to_idx, save_path: str):
         # TF nodes
         nx.draw_networkx_nodes(
             G, pos, ax=ax, nodelist=tfs, node_color="#e8a020",
-            node_shape="D", node_size=2400, edgecolors="white", linewidths=2,
+            node_shape="D", node_size=4200, edgecolors="white", linewidths=2.5,
         )
         # Target nodes
         nx.draw_networkx_nodes(
             G, pos, ax=ax, nodelist=targets, node_color="#88aacc",
-            node_size=1600, edgecolors="white", linewidths=2,
+            node_size=3000, edgecolors="white", linewidths=2.5,
         )
         # Edges, widths scaled across both panels
         edges = list(G.edges(data=True))
@@ -282,26 +282,26 @@ def plot_ad_vs_control_bipartite(mat_ctrl, mat_ad, gene_to_idx, save_path: str):
                 max(abs(d["weight"]) for *_, d in G_ctrl.edges(data=True)),
                 max(abs(d["weight"]) for *_, d in G_ad.edges(data=True)),
             ) or 1.0
-            widths = [1.0 + 8.0 * abs(d["weight"]) / shared_wmax for *_, d in edges]
-            colors = ["#d63838"] * len(edges)   # all 3 are hits → red
+            widths = [2.0 + 12.0 * abs(d["weight"]) / shared_wmax for *_, d in edges]
+            colors = ["#d63838"] * len(edges)
             nx.draw_networkx_edges(
                 G, pos, ax=ax, edgelist=[(u, v) for u, v, _ in edges],
                 width=widths, edge_color=colors, arrows=True,
-                arrowsize=22, alpha=0.85,
-                min_target_margin=22, node_size=1600,
+                arrowsize=30, alpha=0.85,
+                min_target_margin=30, node_size=3000,
             )
         # Labels
-        nx.draw_networkx_labels(G, pos, ax=ax, font_size=13, font_weight="bold")
+        nx.draw_networkx_labels(G, pos, ax=ax, font_size=16, font_weight="bold")
         # weight annotations next to each edge
         for u, v, d in edges:
             x_mid = (pos[u][0] + pos[v][0]) / 2
             y_mid = (pos[u][1] + pos[v][1]) / 2
-            ax.text(x_mid, y_mid + 0.07, f"w={d['weight']:.1e}",
-                    ha="center", fontsize=9, color="#444444",
-                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1.5))
-        ax.set_title(title, fontsize=13)
-        ax.set_xlim(-0.4, 1.4)
-        ax.set_ylim(-0.6, len(tfs) - 0.4)
+            ax.text(x_mid, y_mid + 0.1, f"w={d['weight']:.1e}",
+                    ha="center", fontsize=11, color="#222222",
+                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=2.5))
+        ax.set_title(title, fontsize=16, fontweight="bold")
+        ax.set_xlim(-0.5, 1.5)
+        ax.set_ylim(-0.8, len(tfs) - 0.2)
         ax.set_aspect("equal")
         ax.set_axis_off()
 
@@ -419,17 +419,34 @@ def main() -> int:
         rna_sub, os.path.join(PLOTS_DIR, "cohort_table_adnc.png")
     )
 
-    logger.info("loading per-cell networks (slow, ~10 min) ...")
-    networks = combine_wscreni_networks(
-        cell_names=rna_sub.obs_names.tolist(),
-        network_dir=NETWORKS_DIR,
-    )
-    gene_to_idx = {g: i for i, g in enumerate(networks.gene_names)}
+    # Cache control/AD pseudobulk means + gene index so future styling
+    # iterations skip the 10-min network reload.
+    cache_path = os.path.join(OUT_DIR, f"{DATASET}_{SUB_TAG}_pb_means.npz")
+    if os.path.exists(cache_path):
+        logger.info(f"loading cached pseudobulk means from {cache_path}")
+        cache = np.load(cache_path, allow_pickle=True)
+        mat_ctrl = cache["mat_ctrl"]
+        mat_ad = cache["mat_ad"]
+        gene_names = list(cache["gene_names"])
+        gene_to_idx = {g: i for i, g in enumerate(gene_names)}
+    else:
+        logger.info("loading per-cell networks (slow, ~10 min) ...")
+        networks = combine_wscreni_networks(
+            cell_names=rna_sub.obs_names.tolist(),
+            network_dir=NETWORKS_DIR,
+        )
+        gene_to_idx = {g: i for i, g in enumerate(networks.gene_names)}
 
-    logger.info(f"pseudobulk for {CELL_TYPE} ...")
-    pb, _meta = _pseudobulks_for_ct(rna_sub, networks, CELL_TYPE)
-    mat_ctrl = _condition_avg(pb, "control")
-    mat_ad = _condition_avg(pb, "ad")
+        logger.info(f"pseudobulk for {CELL_TYPE} ...")
+        pb, _meta = _pseudobulks_for_ct(rna_sub, networks, CELL_TYPE)
+        mat_ctrl = _condition_avg(pb, "control")
+        mat_ad = _condition_avg(pb, "ad")
+        np.savez(
+            cache_path,
+            mat_ctrl=mat_ctrl, mat_ad=mat_ad,
+            gene_names=np.array(list(networks.gene_names), dtype=object),
+        )
+        logger.info(f"  cached -> {cache_path}")
 
     triplets = pd.read_csv(TRIPLETS_PATH)
 
