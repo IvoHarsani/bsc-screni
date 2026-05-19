@@ -150,66 +150,85 @@ def _condition_avg(pb, condition: str) -> np.ndarray:
 
 
 def plot_single_tf_fanout(mat: np.ndarray, gene_to_idx: dict, triplets: pd.DataFrame,
-                          tf: str, k_targets: int = 5, save_path: str = ""):
-    """One TF + its top-K candidate targets, drawn as a star.
-
-    Targets are chosen from the Phase 3 triplets for this TF, ranked by
-    absolute weight in the supplied (n_genes, n_genes) matrix.
+                          tfs: list[str], k_per_tf: int = 8, save_path: str = ""):
+    """Multi-TF fan-out: several TFs, each with their top-K candidate targets.
+    Produces a richer-looking network for the intro slide.
     """
-    candidates = triplets[triplets["TF"] == tf]["target_gene"].unique().tolist()
-    j = gene_to_idx[tf]
-    weights = [(t, mat[gene_to_idx[t], j]) for t in candidates if t in gene_to_idx and t != tf]
-    weights.sort(key=lambda kv: abs(kv[1]), reverse=True)
-    top = weights[:k_targets]
-    if not top:
-        logger.warning(f"no targets to plot for {tf}")
-        return
-
     G = nx.DiGraph()
-    G.add_node(tf, kind="TF")
-    for t, w in top:
-        G.add_node(t, kind="target")
-        G.add_edge(tf, t, weight=w)
+    tf_targets: dict[str, list[tuple[str, float]]] = {}
+    for tf in tfs:
+        if tf not in gene_to_idx:
+            continue
+        candidates = triplets[triplets["TF"] == tf]["target_gene"].unique().tolist()
+        j = gene_to_idx[tf]
+        weights = [(t, mat[gene_to_idx[t], j]) for t in candidates if t in gene_to_idx and t != tf]
+        weights.sort(key=lambda kv: abs(kv[1]), reverse=True)
+        tf_targets[tf] = weights[:k_per_tf]
 
-    # star layout: TF center, targets around in a circle
-    pos = {tf: (0.0, 0.0)}
-    n = len(top)
-    for i, (t, _) in enumerate(top):
-        angle = 2 * np.pi * i / n
-        pos[t] = (np.cos(angle), np.sin(angle))
+    # Build graph: keep TFs and all their picked targets
+    for tf, picks in tf_targets.items():
+        G.add_node(tf, kind="TF")
+        for t, w in picks:
+            G.add_node(t, kind="target")
+            G.add_edge(tf, t, weight=w)
 
-    fig, ax = plt.subplots(figsize=(12, 10))
+    # Layout: TFs in a circle in the center, their targets fanning out
+    # behind them (each TF's targets clustered on the side away from the
+    # other TFs).
+    n_tfs = len(tf_targets)
+    pos = {}
+    tf_list = list(tf_targets.keys())
+    radius_tf = 0.45
+    for i, tf in enumerate(tf_list):
+        angle = 2 * np.pi * i / max(n_tfs, 1) + np.pi / 2
+        pos[tf] = (radius_tf * np.cos(angle), radius_tf * np.sin(angle))
+
+    radius_tgt = 1.6
+    for i, tf in enumerate(tf_list):
+        picks = tf_targets[tf]
+        n = len(picks)
+        base_angle = 2 * np.pi * i / max(n_tfs, 1) + np.pi / 2
+        spread = np.pi / max(n_tfs, 1) * 1.6
+        for k, (t, _) in enumerate(picks):
+            theta = base_angle + spread * ((k / max(n - 1, 1)) - 0.5)
+            pos[t] = (radius_tgt * np.cos(theta), radius_tgt * np.sin(theta))
+
+    fig, ax = plt.subplots(figsize=(14, 12))
 
     # nodes
+    tf_nodes = [n for n in G.nodes if G.nodes[n].get("kind") == "TF"]
+    tgt_nodes = [n for n in G.nodes if G.nodes[n].get("kind") == "target"]
     nx.draw_networkx_nodes(
-        G, pos, ax=ax, nodelist=[tf], node_color="#e8a020",
-        node_shape="D", node_size=4200, edgecolors="white", linewidths=2.5,
+        G, pos, ax=ax, nodelist=tf_nodes, node_color="#e8a020",
+        node_shape="D", node_size=4500, edgecolors="white", linewidths=2.5,
     )
     nx.draw_networkx_nodes(
-        G, pos, ax=ax, nodelist=[t for t, _ in top], node_color="#88aacc",
+        G, pos, ax=ax, nodelist=tgt_nodes, node_color="#88aacc",
         node_size=2800, edgecolors="white", linewidths=2.5,
     )
 
     # edges scaled by abs(weight)
-    wmax = max(abs(w) for _, w in top) or 1.0
-    widths = [2.5 + 10.0 * abs(w) / wmax for _, w in top]
+    all_w = [abs(d["weight"]) for _, _, d in G.edges(data=True)]
+    wmax = max(all_w) if all_w else 1.0
+    widths = [2.0 + 9.0 * abs(d["weight"]) / wmax for _, _, d in G.edges(data=True)]
     nx.draw_networkx_edges(
         G, pos, ax=ax, width=widths, edge_color="#555555",
-        arrows=True, arrowsize=30, alpha=0.7,
-        min_target_margin=30, node_size=2800,
+        arrows=True, arrowsize=28, alpha=0.7,
+        min_target_margin=28, node_size=2800,
     )
 
     # labels
-    nx.draw_networkx_labels(G, pos, ax=ax, font_size=16, font_weight="bold")
+    nx.draw_networkx_labels(G, pos, ax=ax, font_size=14, font_weight="bold")
 
+    n_tgt = sum(len(v) for v in tf_targets.values())
     ax.set_title(
-        f"Example: a single-cell regulatory subnetwork\n"
-        f"TF '{tf}' (orange diamond) regulates target genes (blue circles) — "
+        f"Example: gene regulatory subnetwork  ({len(tf_targets)} TFs, {n_tgt} target connections)\n"
+        f"Orange diamonds = transcription factors;  blue circles = target genes;  "
         f"thicker arrows = stronger inferred regulation",
-        fontsize=12,
+        fontsize=13,
     )
-    ax.set_xlim(-1.6, 1.6)
-    ax.set_ylim(-1.5, 1.5)
+    ax.set_xlim(-2.0, 2.0)
+    ax.set_ylim(-2.0, 2.0)
     ax.set_aspect("equal")
     ax.set_axis_off()
     # legend below the plot
@@ -229,79 +248,163 @@ def plot_single_tf_fanout(mat: np.ndarray, gene_to_idx: dict, triplets: pd.DataF
 # ---------------------------------------------------------------------------
 
 
-def plot_ad_vs_control_bipartite(mat_ctrl, mat_ad, gene_to_idx, save_path: str):
+def plot_ad_vs_control_bipartite(mat_ctrl, mat_ad, gene_to_idx, triplets: pd.DataFrame,
+                                  save_path: str, k_context_per_tf: int = 6):
     """Two side-by-side bipartite panels:
-    3 hit TFs (left column) and their 3 hit targets (right column),
-    plus a small number of context-edges to other targets to give shape.
+    3 hit TFs (left column) and their hit targets + extra context targets
+    (right column).  The 3 hit edges are drawn red; the rest grey.  This
+    gives the network real density without changing the headline story.
     """
-    tfs = [tf for tf, _ in HIT_EDGES]
-    targets = [tgt for _, tgt in HIT_EDGES]
+    hit_tfs = [tf for tf, _ in HIT_EDGES]
+    hit_set = set(HIT_EDGES)
+
+    # Pick the targets to display: the 3 hit targets + up to k_context_per_tf
+    # additional targets per TF, ranked by abs(weight) in the control matrix.
+    target_set: list[str] = [t for _, t in HIT_EDGES]
+    for tf in hit_tfs:
+        if tf not in gene_to_idx:
+            continue
+        j = gene_to_idx[tf]
+        candidates = (triplets[triplets["TF"] == tf]["target_gene"].unique().tolist())
+        candidates = [c for c in candidates if c in gene_to_idx and c != tf]
+        candidates.sort(key=lambda c: abs(mat_ctrl[gene_to_idx[c], j]), reverse=True)
+        for c in candidates:
+            if c in target_set:
+                continue
+            if (tf, c) in hit_set:
+                continue
+            target_set.append(c)
+            if sum(1 for t in target_set
+                   if (tf, t) not in hit_set
+                   and abs(mat_ctrl[gene_to_idx[t], j]) > 0) > k_context_per_tf * len(hit_tfs):
+                break
+
+    # Deduplicate but keep order
+    seen = set()
+    targets = [t for t in target_set if not (t in seen or seen.add(t))]
 
     def build(mat):
         G = nx.DiGraph()
-        for tf in tfs:
+        for tf in hit_tfs:
             G.add_node(tf, kind="TF")
         for tgt in targets:
             G.add_node(tgt, kind="target")
+        # Hit edges
         for tf, tgt in HIT_EDGES:
             if tf in gene_to_idx and tgt in gene_to_idx:
                 w = mat[gene_to_idx[tgt], gene_to_idx[tf]]
                 G.add_edge(tf, tgt, weight=w, hit=True)
+        # Context edges: for each TF, draw to each target in the display
+        # set whose triplet pairing exists (i.e. it's a candidate edge).
+        triplet_pairs = set(zip(triplets["TF"], triplets["target_gene"]))
+        for tf in hit_tfs:
+            if tf not in gene_to_idx:
+                continue
+            j = gene_to_idx[tf]
+            for tgt in targets:
+                if (tf, tgt) in hit_set:
+                    continue
+                if (tf, tgt) not in triplet_pairs:
+                    continue
+                if tgt not in gene_to_idx:
+                    continue
+                w = mat[gene_to_idx[tgt], j]
+                G.add_edge(tf, tgt, weight=w, hit=False)
         return G
 
     G_ctrl = build(mat_ctrl)
     G_ad = build(mat_ad)
 
-    # bipartite layout: TFs left at x=0, targets right at x=1
+    # Bipartite layout: TFs on left at x=0, targets on right at x=1.
+    # Order targets so each one is closest to the TF that connects most
+    # strongly — minimises edge crossings.
     pos = {}
-    for i, tf in enumerate(tfs):
-        pos[tf] = (0.0, len(tfs) - 1 - i)
-    for i, tgt in enumerate(targets):
-        pos[tgt] = (1.0, len(targets) - 1 - i)
+    for i, tf in enumerate(hit_tfs):
+        pos[tf] = (0.0, (len(hit_tfs) - 1 - i) * (len(targets) / max(len(hit_tfs), 1)))
 
-    # equal axis range so the panels look identical in scale
-    fig, axes = plt.subplots(1, 2, figsize=(18, 9))
+    # Assign each target to a primary TF (the one with strongest control weight)
+    target_primary_tf = {}
+    for tgt in targets:
+        best_tf, best_w = None, -1.0
+        for tf in hit_tfs:
+            if tf not in gene_to_idx or tgt not in gene_to_idx:
+                continue
+            w = abs(mat_ctrl[gene_to_idx[tgt], gene_to_idx[tf]])
+            if w > best_w:
+                best_w, best_tf = w, tf
+        target_primary_tf[tgt] = best_tf
+
+    # Group targets by their primary TF, place each group near that TF
+    targets_by_tf = {tf: [] for tf in hit_tfs}
+    for tgt in targets:
+        targets_by_tf[target_primary_tf[tgt]].append(tgt)
+    y_cursor = 0.0
+    for tf in hit_tfs:
+        for tgt in targets_by_tf[tf]:
+            pos[tgt] = (1.6, y_cursor)
+            y_cursor += 1.0
+
+    # figure size scales with target count for readability
+    fig_h = max(8.0, 0.45 * len(targets))
+    fig, axes = plt.subplots(1, 2, figsize=(18, fig_h))
+    # global edge-weight max so both panels share scale
+    shared_wmax = max(
+        max((abs(d["weight"]) for *_, d in G_ctrl.edges(data=True)), default=0.0),
+        max((abs(d["weight"]) for *_, d in G_ad.edges(data=True)), default=0.0),
+    ) or 1.0
     for ax, G, title in [
         (axes[0], G_ctrl, "Average control donor"),
         (axes[1], G_ad,   "Average AD donor"),
     ]:
         # TF nodes
         nx.draw_networkx_nodes(
-            G, pos, ax=ax, nodelist=tfs, node_color="#e8a020",
-            node_shape="D", node_size=4200, edgecolors="white", linewidths=2.5,
+            G, pos, ax=ax, nodelist=hit_tfs, node_color="#e8a020",
+            node_shape="D", node_size=5400, edgecolors="white", linewidths=2.5,
         )
         # Target nodes
         nx.draw_networkx_nodes(
             G, pos, ax=ax, nodelist=targets, node_color="#88aacc",
-            node_size=3000, edgecolors="white", linewidths=2.5,
+            node_size=2400, edgecolors="white", linewidths=2.0,
         )
-        # Edges, widths scaled across both panels
-        edges = list(G.edges(data=True))
-        if edges:
-            shared_wmax = max(
-                max(abs(d["weight"]) for *_, d in G_ctrl.edges(data=True)),
-                max(abs(d["weight"]) for *_, d in G_ad.edges(data=True)),
-            ) or 1.0
-            widths = [2.0 + 12.0 * abs(d["weight"]) / shared_wmax for *_, d in edges]
-            colors = ["#d63838"] * len(edges)
+
+        # Draw context edges first (grey, thinner), then hit edges (red, thicker)
+        ctx_edges = [(u, v, d) for u, v, d in G.edges(data=True) if not d.get("hit")]
+        hit_edges = [(u, v, d) for u, v, d in G.edges(data=True) if d.get("hit")]
+
+        if ctx_edges:
+            widths = [0.5 + 5.0 * abs(d["weight"]) / shared_wmax for *_, d in ctx_edges]
             nx.draw_networkx_edges(
-                G, pos, ax=ax, edgelist=[(u, v) for u, v, _ in edges],
-                width=widths, edge_color=colors, arrows=True,
-                arrowsize=30, alpha=0.85,
-                min_target_margin=30, node_size=3000,
+                G, pos, ax=ax, edgelist=[(u, v) for u, v, _ in ctx_edges],
+                width=widths, edge_color="#9a9a9a", arrows=True,
+                arrowsize=18, alpha=0.55,
+                min_target_margin=20, node_size=2400,
             )
-        # Labels
-        nx.draw_networkx_labels(G, pos, ax=ax, font_size=16, font_weight="bold")
-        # weight annotations next to each edge
-        for u, v, d in edges:
+        if hit_edges:
+            widths = [3.5 + 12.0 * abs(d["weight"]) / shared_wmax for *_, d in hit_edges]
+            nx.draw_networkx_edges(
+                G, pos, ax=ax, edgelist=[(u, v) for u, v, _ in hit_edges],
+                width=widths, edge_color="#d63838", arrows=True,
+                arrowsize=32, alpha=0.95,
+                min_target_margin=22, node_size=2400,
+            )
+
+        # Labels — TFs bold and larger
+        nx.draw_networkx_labels(G, pos, ax=ax, labels={t: t for t in hit_tfs},
+                                 font_size=16, font_weight="bold")
+        nx.draw_networkx_labels(G, pos, ax=ax, labels={t: t for t in targets},
+                                 font_size=11)
+
+        # Weight annotations only on the 3 hit edges (don't clutter context)
+        for u, v, d in hit_edges:
             x_mid = (pos[u][0] + pos[v][0]) / 2
             y_mid = (pos[u][1] + pos[v][1]) / 2
-            ax.text(x_mid, y_mid + 0.1, f"w={d['weight']:.1e}",
-                    ha="center", fontsize=11, color="#222222",
-                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=2.5))
+            ax.text(x_mid, y_mid + 0.25, f"w={d['weight']:.1e}",
+                    ha="center", fontsize=10, color="#b71c1c",
+                    bbox=dict(facecolor="white", edgecolor="#d63838", alpha=0.9, pad=2))
+
         ax.set_title(title, fontsize=16, fontweight="bold")
-        ax.set_xlim(-0.5, 1.5)
-        ax.set_ylim(-0.8, len(tfs) - 0.2)
+        ax.set_xlim(-0.4, 2.0)
+        ax.set_ylim(-1.0, len(targets) + 0.5)
         ax.set_aspect("equal")
         ax.set_axis_off()
 
@@ -309,13 +412,14 @@ def plot_ad_vs_control_bipartite(mat_ctrl, mat_ad, gene_to_idx, save_path: str):
         mpatches.Patch(color="#e8a020", label="Transcription factor"),
         mpatches.Patch(color="#88aacc", label="Target gene"),
         mpatches.Patch(color="#d63838", label="q<0.05 differential edge"),
+        mpatches.Patch(color="#9a9a9a", label="other inferred edges (context)"),
     ]
-    fig.legend(handles=legend, loc="upper center", bbox_to_anchor=(0.5, 1.04),
-               ncol=3, frameon=False, fontsize=11)
+    fig.legend(handles=legend, loc="upper center", bbox_to_anchor=(0.5, 1.02),
+               ncol=4, frameon=False, fontsize=11)
     fig.suptitle(
-        f"Top differential regulatory edges ({CELL_TYPE}) — control vs AD\n"
-        f"thicker arrows = stronger inferred regulation; weights labeled on each edge",
-        fontsize=13, y=0.98,
+        f"Regulatory subnetwork around the 3 L2/3 IT q<0.05 hits — control vs AD\n"
+        f"red edges = significant differential edges; grey = other candidate regulatory edges from Phase 3",
+        fontsize=13, y=0.985,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(save_path)
@@ -450,17 +554,20 @@ def main() -> int:
 
     triplets = pd.read_csv(TRIPLETS_PATH)
 
-    # Plot 1: single-TF fan-out using control matrix.  Pick LEF1 (one of
-    # our hits, also a well-known TF the audience may recognise from Wnt).
+    # Plot 1: multi-TF fan-out using control matrix.  Use the 3 hit TFs
+    # plus 8 of their top inferred targets each for a richer network look.
     plot_single_tf_fanout(
         mat=mat_ctrl, gene_to_idx=gene_to_idx, triplets=triplets,
-        tf="LEF1", k_targets=5,
+        tfs=[tf for tf, _ in HIT_EDGES],
+        k_per_tf=8,
         save_path=os.path.join(PLOTS_DIR, "network_example_v2.png"),
     )
 
-    # Plot 2: bipartite control vs AD over the 3 hit edges only
+    # Plot 2: bipartite control vs AD with 3 hit edges (red) plus ~6
+    # context edges per TF (grey) to other candidate triplet targets.
     plot_ad_vs_control_bipartite(
         mat_ctrl=mat_ctrl, mat_ad=mat_ad, gene_to_idx=gene_to_idx,
+        triplets=triplets, k_context_per_tf=6,
         save_path=os.path.join(PLOTS_DIR, "network_ad_vs_control_v2.png"),
     )
 
