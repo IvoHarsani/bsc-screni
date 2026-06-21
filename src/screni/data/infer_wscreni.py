@@ -8,6 +8,7 @@ import os
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
+from numpy import ndarray
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.inspection import permutation_importance
 
@@ -136,7 +137,7 @@ def gene_peak_random_forest(
 
         if y.sum() == 0:
             # All-zero target → no signal, return zero weights
-            return weight_vector
+            return weight_vector, np.nan
 
         # mtry (max_features)
         n_input_vars = len(other_idxs) + n_peaks
@@ -205,21 +206,23 @@ def gene_peak_random_forest(
             gene_coef  = im.get(gene_j, 0.0)
 
             if gene_j in TFs_of_target:
-                # gene_j is a TF that regulates the target → include target peak signal
+                # gene_j is a TF that regulates the target, include target peak signal
                 weight_vector[j] = gene_coef + y_peak_coef + peakj_coef
             else:
                 weight_vector[j] = gene_coef + peakj_coef
 
-        return weight_vector
+        return weight_vector, rf.oob_score_
 
     # Run over all target genes (sequential inside one pseudo-cell)
-    columns = [_fit_one_gene(idx) for idx in range(n_genes)]
+    results = [_fit_one_gene(idx) for idx in range(n_genes)]
+    columns = [r[0] for r in results]
+    oob_r2 = np.array([r[1] for r in results])  # (n_genes,)
 
     # Stack: each column = importances onto that target gene
     weights = np.column_stack(columns)          # shape: (n_genes, n_genes)
     weights /= n_samples                        # normalize by number of pooled cells
 
-    return weights
+    return weights, oob_r2
 
 
 # ---------------------------------------------------------------------------
@@ -231,12 +234,11 @@ def infer_wScReNI_sc_networks(
     gene_peak_overlap_matrix,      # pd.DataFrame or np.ndarray, genes × cells
     gene_peak_overlap_labs: GenePeakOverlapLabs,
     nearest_neighbors_idx: np.ndarray,   # shape (n_cells, K)  — 0-based indices
-    network_path: str,
-    data_name: str,
     cell_index=None,               # list/array of 0-based cell indices to process
     nthread: int = 50,
     max_cell_per_batch: int = 10,
-) -> list[np.ndarray]:
+    seed: int | None = None,
+) -> tuple[list[ndarray], list[ndarray]]:
     """
     Build single-cell regulatory weight matrices with wScReNI.
 
@@ -295,10 +297,6 @@ def infer_wScReNI_sc_networks(
     n_target_cells = len(cells_to_process)
     n_batches = int(np.ceil(n_target_cells / max_cell_per_batch))
 
-    # Create output directories
-    out_dir = os.path.join(network_path, "wScReNI")
-    os.makedirs(out_dir, exist_ok=True)
-
     # Worker: process one cell
     def _process_cell(i: int):
         """
@@ -315,20 +313,15 @@ def infer_wScReNI_sc_networks(
         wnn_expr = pd.DataFrame(expr_np[:, pooled_cols], index=gene_names_list)
         wnn_peak = pd.DataFrame(peak_np[:, pooled_cols], index=peak_names_list)
 
-        weights = gene_peak_random_forest(
-            wnn_expr, wnn_peak, gene_peak_overlap_labs, n_jobs=1
+        weights, oob_r2 = gene_peak_random_forest(
+            wnn_expr, wnn_peak, gene_peak_overlap_labs, n_jobs=1, seed=seed
         )
 
-        cell_name = cell_names[i]
-        out_file  = os.path.join(out_dir, f"{i}.{cell_name}.network.txt")
-        pd.DataFrame(weights, index=gene_names_list, columns=gene_names_list).to_csv(
-            out_file, sep="\t"
-        )
-        print(f"  Saved: {out_file}")
-        return weights
+        return weights, oob_r2
 
     # Batch loop with joblib parallelism
     all_networks: list[np.ndarray] = []
+    all_oob: list[np.ndarray] = []
 
     for batch_idx in range(n_batches):
         start = batch_idx * max_cell_per_batch
@@ -337,27 +330,17 @@ def infer_wScReNI_sc_networks(
 
         print(f"Cell {batch_cells[0]} to cell {batch_cells[-1]}")
 
-        # Cap threads to ~1.5× batch size (mirrors the R logic)
+        # Cap threads to ~1.5 batch size (mirrors the R logic)
         n_workers = min(nthread, max(1, int(len(batch_cells) * 1.5)))
 
         batch_results = Parallel(n_jobs=n_workers)(
             delayed(_process_cell)(i) for i in batch_cells
         )
-        all_networks.extend(batch_results)
+        all_networks.extend([r[0] for r in batch_results])
+        all_oob.extend([r[1] for r in batch_results])
 
-    return all_networks
+    return all_networks, all_oob
 
-
-# ---------------------------------------------------------------------------
-# Load preprocessed retinal data and run wScReNI
-# ---------------------------------------------------------------------------
-# Expected files in data/processed/ (adjust BASE path as needed):
-#   retinal_rna_sub.h5ad           (400 cells, 500 HVGs)
-#   retinal_atac_sub.h5ad          (400 cells, 10000 peaks)  — upstream use only
-#   retinal_knn_indices.npy        (400, 20)  0-based KNN from Harmony embedding
-#   retinal_triplets.csv           columns: target_gene | peak | spearman_r | TF
-#   retinal_gene_labels.csv        columns: gene | type | associated_peaks | associated_TFs
-#   retinal_peak_overlap_matrix.npz  key "peak_matrix", shape (400, 217)
 
 if __name__ == "__main__":
     import anndata as ad
@@ -443,8 +426,6 @@ if __name__ == "__main__":
         gene_peak_overlap_matrix = peak_df,
         gene_peak_overlap_labs   = labs,
         nearest_neighbors_idx    = knn,       # (400, 20), 0-based
-        network_path             = "output/networks",
-        data_name                = DATASET,
         cell_index               = None,      # None = all 400 cells
         nthread                  = 8,
         max_cell_per_batch       = 10,
